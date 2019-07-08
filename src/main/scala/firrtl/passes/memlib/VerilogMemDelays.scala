@@ -30,7 +30,17 @@ object DelayPipe {
 }
 
 /** This pass generates delay reigsters for memories for verilog */
-object VerilogMemDelays extends Pass {
+class VerilogMemDelays extends Pass {
+
+  override val prerequisites = firrtl.stage.Forms.LowForm :+ classOf[firrtl.passes.RemoveValidIf]
+
+  override val dependents = Seq(classOf[VerilogEmitter], classOf[SystemVerilogEmitter])
+
+  override def invalidates(a: Transform): Boolean = a match {
+    case _: firrtl.transforms.ConstantPropagation => true
+    case _ => false
+  }
+
   val ug = UnknownFlow
   type Netlist = collection.mutable.HashMap[String, Expression]
   implicit def expToString(e: Expression): String = e.serialize
@@ -199,4 +209,10 @@ object VerilogMemDelays extends Pass {
 
   def run(c: Circuit): Circuit =
     c copy (modules = c.modules map memDelayMod)
+}
+
+object VerilogMemDelays extends Pass with DeprecatedPassObject {
+
+  override protected lazy val underlying = new VerilogMemDelays
+
 }

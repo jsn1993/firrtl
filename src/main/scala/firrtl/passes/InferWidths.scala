@@ -11,6 +11,7 @@ import firrtl.annotations.{Annotation, ReferenceTarget}
 import firrtl.ir._
 import firrtl.Utils._
 import firrtl.Mappers._
+import firrtl.options.PreservesAll
 import firrtl.traversals.Foreachers._
 
 case class WidthGeqConstraintAnnotation(loc: ReferenceTarget, exp: ReferenceTarget) extends Annotation {
@@ -33,7 +34,14 @@ case class WidthGeqConstraintAnnotation(loc: ReferenceTarget, exp: ReferenceTarg
   }
 }
 
-class InferWidths extends Transform with ResolvedAnnotationPaths {
+class InferWidths extends Transform with ResolvedAnnotationPaths with PreservesAll[Transform] {
+
+  override val prerequisites =
+    Seq( classOf[passes.ResolveKinds],
+         classOf[passes.InferTypes],
+         classOf[passes.Uniquify],
+         classOf[passes.ResolveFlows] ) ++ firrtl.stage.Forms.WorkingIR
+
   def inputForm: CircuitForm = UnknownForm
   def outputForm: CircuitForm = UnknownForm
 
@@ -393,7 +401,8 @@ class InferWidths extends Transform with ResolvedAnnotationPaths {
       Port(p.info, p.name, p.direction, reduce_var_widths_t(p.tpe))
     }
 
-    InferTypes.run(c.copy(modules = c.modules map (_
+    /* @todo: This should be moved outside of [[InferWidths]] */
+    (new InferTypes).run(c.copy(modules = c.modules map (_
       map reduce_var_widths_p
       map reduce_var_widths_s)))
   }
