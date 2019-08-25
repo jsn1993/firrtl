@@ -12,7 +12,6 @@ import firrtl.PrimOps._
 import firrtl.graph.DiGraph
 import firrtl.analyses.InstanceGraph
 import firrtl.annotations.TargetToken.Ref
-import firrtl.options.PreservesAll
 
 import annotation.tailrec
 import collection.mutable
@@ -91,12 +90,16 @@ object ConstantPropagation {
 
 }
 
-class ConstantPropagation extends Transform with ResolvedAnnotationPaths with PreservesAll[Transform] {
+class ConstantPropagation extends Transform with ResolvedAnnotationPaths {
   import ConstantPropagation._
   def inputForm = LowForm
   def outputForm = LowForm
 
-  override val prerequisites = firrtl.stage.Forms.LowForm :+ classOf[passes.RemoveValidIf]
+  override val prerequisites =
+    ((new mutable.LinkedHashSet())
+       ++ firrtl.stage.Forms.LowForm
+       - classOf[firrtl.passes.Legalize]
+       + classOf[firrtl.passes.RemoveValidIf]).toSeq
 
   override val dependents =
     Seq( classOf[firrtl.passes.memlib.VerilogMemDelays],
@@ -104,6 +107,11 @@ class ConstantPropagation extends Transform with ResolvedAnnotationPaths with Pr
          classOf[SystemVerilogEmitter],
          classOf[VerilogEmitter],
          classOf[firrtl.stage.Forms.LowFormOptimizedHook] )
+
+  override def invalidates(a: Transform): Boolean = a match {
+    case a: firrtl.passes.Legalize => true
+    case _ => false
+  }
 
   override val annotationClasses: Traversable[Class[_]] = Seq(classOf[DontTouchAnnotation])
 
