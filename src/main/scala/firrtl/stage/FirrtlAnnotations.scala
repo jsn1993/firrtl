@@ -153,6 +153,7 @@ object CompilerAnnotation extends HasShellOptions {
       case "verilog"   => new VerilogCompiler()
       case "mverilog"  => new MinimumVerilogCompiler()
       case "sverilog"  => new SystemVerilogCompiler()
+      case "pymtl3"    => new PyMTL3Compiler()
       case _           => throw new OptionsException(s"Unknown compiler name '$compilerName'! (Did you misspell it?)")
     }
     CompilerAnnotation(c)
@@ -164,7 +165,7 @@ object CompilerAnnotation extends HasShellOptions {
       toAnnotationSeq = a => Seq(CompilerAnnotation(a)),
       helpText        = "The FIRRTL compiler to use (default: verilog)",
       shortOption     = Some("X"),
-      helpValueName   = Some("<none|high|middle|low|verilog|mverilog|sverilog>") ) )
+      helpValueName   = Some("<none|high|middle|low|verilog|mverilog|sverilog|pymtl3>") ) )
 
 }
 

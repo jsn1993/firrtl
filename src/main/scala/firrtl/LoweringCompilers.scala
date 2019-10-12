@@ -182,3 +182,10 @@ class SystemVerilogCompiler extends VerilogCompiler {
   override val emitter = new SystemVerilogEmitter
   StageUtils.dramaticWarning("SystemVerilog Compiler behaves the same as the Verilog Compiler!")
 }
+
+/** Emits PyMTL3 code */
+class PyMTL3Compiler extends Compiler {
+  val emitter = new PyMTL3Emitter
+  def transforms: Seq[Transform] = getLoweringTransforms(ChirrtlForm, LowForm) ++
+    Seq(new LowFirrtlOptimization)
+}

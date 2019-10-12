@@ -229,6 +229,7 @@ extends ComposableOptions {
       case "verilog"   => new VerilogCompiler()
       case "mverilog"  => new MinimumVerilogCompiler()
       case "sverilog"  => new SystemVerilogCompiler()
+      case "pymtl3"    => new PyMTL3Compiler()
     }
   }
 
@@ -236,6 +237,7 @@ extends ComposableOptions {
     compilerName match {
       case "verilog" | "mverilog" => "v"
       case "sverilog"             => "sv"
+      case "pymtl3"               => "py"
       case "low"                  => "lo.fir"
       case "middle"               => "mid.fir"
       case "high"                 => "hi.fir"
@@ -290,6 +292,7 @@ extends ComposableOptions {
       case "verilog" => classOf[VerilogEmitter]
       case "mverilog" => classOf[MinimumVerilogEmitter]
       case "sverilog" => classOf[VerilogEmitter]
+      case "pymtl3" => classOf[PyMTL3Emitter]
     }
     getOutputConfig(optionsManager) match {
       case SingleFile(_) => Seq(EmitCircuitAnnotation(emitter))
@@ -389,12 +392,12 @@ trait HasFirrtlOptions {
 
   parser.opt[String]("compiler")
     .abbr("X")
-    .valueName ("<high|middle|low|verilog|mverilog|sverilog|none>")
+    .valueName ("<high|middle|low|verilog|mverilog|sverilog|pymtl3|none>")
     .foreach { x =>
       firrtlOptions = firrtlOptions.copy(compilerName = x)
     }
     .validate { x =>
-      if (Array("high", "middle", "low", "verilog", "mverilog", "sverilog", "none").contains(x.toLowerCase)) {
+      if (Array("high", "middle", "low", "verilog", "mverilog", "sverilog", "pymtl3", "none").contains(x.toLowerCase)) {
         parser.success
       } else {
         parser.failure(s"$x not a legal compiler")
@@ -552,7 +555,7 @@ object FirrtlExecutionSuccess {
   * the type of compile
   *
   * @param emitType The name of the compiler used, currently "high", "middle", "low", "verilog", "mverilog", or
-  * "sverilog"
+  * "sverilog", or "pymtl3"
   * @param emitted   The emitted result of compilation
   */
 @deprecated("Use FirrtlStage and examine the output AnnotationSeq directly", "1.2")
