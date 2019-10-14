@@ -1079,9 +1079,11 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
   }
   def stringify(tpe: GroundType): String = tpe match {
     case (_: UIntType | _: SIntType | _: AnalogType) =>
-      val wx = bitWidth(tpe) - 1
-      if (wx > 0) s"[$wx:0]" else ""
-    case ClockType | AsyncResetType => ""
+      val wx = bitWidth(tpe)
+      s"$wx"
+    case ClockType | AsyncResetType =>
+      val wx = bitWidth(tpe)
+      s"$wx"
     case _ => throwInternalError(s"trying to write unsupported type in the PyMTL3 Emitter: $tpe")
   }
   def emit(x: Any)(implicit w: Writer): Unit = { emit(x, 0) }
@@ -1105,16 +1107,17 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
         emit(Seq(e.cond," ? ",cast(e.tval)," : ",cast(e.fval)),top + 1)
       }
       case (e: ValidIf) => emit(Seq(cast(e.value)),top + 1)
-      case (e: WRef) => w write e.serialize
-      case (e: WSubField) => w write LowerTypes.loweredName(e)
-      case (e: WSubAccess) => w write s"${LowerTypes.loweredName(e.expr)}[${LowerTypes.loweredName(e.index)}]"
-      case (e: WSubIndex) => w write e.serialize
+      // Shunning: add "s." to all the signals
+      case (e: WRef) => w write s"s.${e.serialize}"
+      case (e: WSubField) => w write s"s.${LowerTypes.loweredName(e)}"
+      case (e: WSubAccess) => w write s"s.${LowerTypes.loweredName(e.expr)}[s.${LowerTypes.loweredName(e.index)}]"
+      case (e: WSubIndex) => w write s"s.${e.serialize}"
       case (e: Literal) => v_print(e)
       case (e: VRandom) => w write s"{${e.nWords}{`RANDOM}}"
       case (t: GroundType) => w write stringify(t)
       case (t: VectorType) =>
         emit(t.tpe, top + 1)
-        w write s"[${t.size - 1}:0]"
+        w write s"[0:${t.size}]"
       case (s: String) => w write s
       case (i: Int) => w write i.toString
       case (i: Long) => w write i.toString
@@ -1133,7 +1136,7 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
    //;------------- PASS -----------------
    def v_print(e: Expression)(implicit w: Writer) = e match {
      case UIntLiteral(value, IntWidth(width)) =>
-       w write s"$width'h${value.toString(16)}"
+       w write s"b$width(0x${value.toString(16)})"
      case SIntLiteral(value, IntWidth(width)) =>
        val stringLiteral = value.toString(16)
        w write (stringLiteral.head match {
@@ -1234,11 +1237,11 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
          case (_: SIntType) => Seq(cast(a0)," >>> ", a1)
          case (_) => Seq(cast(a0), " >> ", a1)
        }
-       case Shl => if (c0 > 0) Seq("{", cast(a0), s", $c0'h0}") else Seq(cast(a0))
+       case Shl => if (c0 > 0) Seq("concat( ", cast(a0), s", b$c0(0) )") else Seq(cast(a0))
        case Shr if c0 >= bitWidth(a0.tpe) =>
          error("PyMTL3 emitter does not support SHIFT_RIGHT >= arg width")
-       case Shr => Seq(a0,"[", bitWidth(a0.tpe) - 1, ":", c0, "]")
-       case Neg => Seq("-{", cast(a0), "}")
+       case Shr => Seq(a0,"[", c0, ":", bitWidth(a0.tpe), "]")
+       case Neg => Seq("- ", cast(a0))
        case Cvt => a0.tpe match {
          case (_: UIntType) => Seq("{1'b0,", cast(a0), "}")
          case (_: SIntType) => Seq(cast(a0))
@@ -1257,13 +1260,13 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
        case Bits => Seq(a0, "[", c0, ":", c1, "]")
        case Head =>
          val w = bitWidth(a0.tpe)
-         val high = w - 1
+         // Verilog [high-1:low] <=> PyMTL [low:high]
          val low = w - c0
-         Seq(a0, "[", high, ":", low, "]")
+         Seq(a0, "[", low, ":", w, "]")
        case Tail =>
          val w = bitWidth(a0.tpe)
-         val low = w - c0 - 1
-         Seq(a0, "[", low, ":", 0, "]")
+         val low = w - c0
+         Seq(a0, "[", 0, ":", low, "]")
      }
    }
 
@@ -1333,39 +1336,42 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
     val asyncInitials = ArrayBuffer[Seq[Any]]()
     val simulates = ArrayBuffer[Seq[Any]]()
 
+    // Shunning: helper function for comments
+    def dumpInfo(info: Info): String =
+      if (info.serialize.isEmpty) "" else s" #$info"
+
     def bigIntToVLit(bi: BigInt): String =
       if (bi.isValidInt) bi.toString else s"${bi.bitLength}'d$bi"
 
     def declareVectorType(b: String, n: String, tpe: Type, size: BigInt, info: Info) = {
-      declares += Seq(b, " ", tpe, " ", n, " [0:", bigIntToVLit(size - 1), "];", info)
+      //declares += Seq(b, " ", tpe, " ", n, " [0:", bigIntToVLit(size - 1), "];", info)
+      declares += Seq(n, " = [ ", b, "( Bits", tpe, " ) for _ in range(", bigIntToVLit(size), ") ]", dumpInfo(info))
     }
 
     def declare(b: String, n: String, t: Type, info: Info) = t match {
       case tx: VectorType =>
         declareVectorType(b, n, tx.tpe, tx.size, info)
       case tx =>
-        declares += Seq(b, " ", tx, " ", n,";",info)
+        //declares += Seq(b, " ", tx, " ", n,";",info)
+        declares += Seq(n, " = ", b, "( Bits", tx," )", dumpInfo(info))
     }
-
+    // Shunning: generate lambda to begin with
     def assign(e: Expression, value: Expression, info: Info): Unit = {
-      assigns += Seq("assign ", e, " = ", value, ";", info)
+      //assigns += Seq("@s.update")
+      //assigns += Seq("def assign_", e, "():" )// # ", info)
+      //assigns += Seq(tab, e, " = ", value)
+      //assigns += Seq(e, " //= lambda: ", value, dumpInfo(info) )
+      // Shunning: I try to avoid lambda when simple connect can solve the problem
+      value match {
+        case _: UIntLiteral | _: WRef =>
+          assigns += Seq(e, " //= ", value, dumpInfo(info) )
+        case _ =>
+          //println( value.getClass.getName, e.toString, value.toString )
+          assigns += Seq(e, " //= lambda: ", value, dumpInfo(info) )
+      }
     }
 
-    // In simulation, assign garbage under a predicate
-    def garbageAssign(e: Expression, syn: Expression, garbageCond: Expression, info: Info) = {
-      assigns += Seq("`ifndef RANDOMIZE_GARBAGE_ASSIGN")
-      assigns += Seq("assign ", e, " = ", syn, ";", info)
-      assigns += Seq("`else")
-      assigns += Seq("assign ", e, " = ", garbageCond, " ? ", rand_string(syn.tpe), " : ", syn,
-                     ";", info)
-      assigns += Seq("`endif // RANDOMIZE_GARBAGE_ASSIGN")
-    }
-
-    def invalidAssign(e: Expression) = {
-      assigns += Seq("`ifdef RANDOMIZE_INVALID_ASSIGN")
-      assigns += Seq("assign ", e, " = ", rand_string(e.tpe), ";")
-      assigns += Seq("`endif // RANDOMIZE_INVALID_ASSIGN")
-    }
+    // Shunning: remove garbage and invalid assign
 
     def regUpdate(r: Expression, clk: Expression, reset: Expression, init: Expression) = {
       def addUpdate(expr: Expression, tabs: String): Seq[Seq[Any]] = {
@@ -1375,25 +1381,24 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
             if (m.tpe == ClockType) throw EmitterException("Cannot emit clock muxes directly")
             if (m.tpe == AsyncResetType) throw EmitterException("Cannot emit async reset muxes directly")
 
-            def ifStatement = Seq(tabs, "if (", m.cond, ") begin")
+            def ifStatement = Seq(tabs, "if ", m.cond, ":")
 
             val trueCase = addUpdate(m.tval, tabs + tab)
-            val elseStatement = Seq(tabs, "end else begin")
+            val elseStatement = Seq(tabs, "else: ")
 
-            def ifNotStatement = Seq(tabs, "if (!(", m.cond, ")) begin")
+            def ifNotStatement = Seq(tabs, "if not (", m.cond, "):")
 
             val falseCase = addUpdate(m.fval, tabs + tab)
-            val endStatement = Seq(tabs, "end")
 
             ((trueCase.nonEmpty, falseCase.nonEmpty): @unchecked) match {
               case (true, true) =>
-                ifStatement +: trueCase ++: elseStatement +: falseCase :+ endStatement
+                ifStatement +: trueCase ++: elseStatement +: falseCase
               case (true, false) =>
-                ifStatement +: trueCase :+ endStatement
+                ifStatement +: trueCase
               case (false, true) =>
-                ifNotStatement +: falseCase :+ endStatement
+                ifNotStatement +: falseCase
             }
-          case e => Seq(Seq(tabs, r, " <= ", e, ";"))
+          case e => Seq(Seq(tabs, r, " <<= ", e, ";"))
         }
       }
       if (weq(init, r)) { // Synchronous Reset
@@ -1408,49 +1413,11 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
 
     def update(e: Expression, value: Expression, clk: Expression, en: Expression, info: Info) = {
       val lines = noResetAlwaysBlocks.getOrElseUpdate(clk, ArrayBuffer[Seq[Any]]())
-      if (weq(en, one)) lines += Seq(e, " <= ", value, ";")
+      if (weq(en, one)) lines += Seq(e, " <<= ", value)
       else {
-        lines += Seq("if(", en, ") begin")
-        lines += Seq(tab, e, " <= ", value, ";", info)
-        lines += Seq("end")
+        lines += Seq("if ", en, ":")
+        lines += Seq(tab, e, " <<= ", value, dumpInfo(info))
       }
-    }
-
-    // Declares an intermediate wire to hold a large enough random number.
-    // Then, return the correct number of bits selected from the random value
-    def rand_string(t: Type): Seq[Any] = {
-      val nx = namespace.newName("_RAND")
-      val rand = VRandom(bitWidth(t))
-      val tx = SIntType(IntWidth(rand.realWidth))
-      declare("reg", nx, tx, NoInfo)
-      initials += Seq(wref(nx, tx), " = ", VRandom(bitWidth(t)), ";")
-      Seq(nx, "[", bitWidth(t) - 1, ":0]")
-    }
-
-    def initialize(e: Expression, reset: Expression, init: Expression) = {
-      initials += Seq("`ifdef RANDOMIZE_REG_INIT")
-      initials += Seq(e, " = ", rand_string(e.tpe), ";")
-      initials += Seq("`endif // RANDOMIZE_REG_INIT")
-      reset.tpe match {
-        case AsyncResetType =>
-          asyncInitials += Seq("if (", reset, ") begin")
-          asyncInitials += Seq(tab, e, " = ", init, ";")
-          asyncInitials += Seq("end")
-        case _ => // do nothing
-      }
-    }
-
-    def initialize_mem(s: DefMemory): Unit = {
-      if (s.depth > maxMemSize) {
-        maxMemSize = s.depth
-      }
-      val index = wref("initvar", s.dataType)
-      val rstring = rand_string(s.dataType)
-      initials += Seq("`ifdef RANDOMIZE_MEM_INIT")
-      initials += Seq("for (initvar = 0; initvar < ", bigIntToVLit(s.depth), "; initvar = initvar+1)")
-      initials += Seq(tab, WSubAccess(wref(s.name, s.dataType), index, s.dataType, SinkFlow),
-                      " = ", rstring, ";")
-      initials += Seq("`endif // RANDOMIZE_MEM_INIT")
     }
 
     def simulate(clk: Expression, en: Expression, s: Seq[Any], cond: Option[String], info: Info) = {
@@ -1485,28 +1452,24 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
 
       if (lines.size > 1) {
         val lineSeqs = lines.tail.map {
-          case "" => Seq(" *")
-          case nonEmpty => Seq(" * ", nonEmpty)
+          case "" => Seq(" #")
+          case nonEmpty => Seq(" # ", nonEmpty)
         }
-        Seq("/* ", lines.head) +: lineSeqs :+ Seq(" */")
+        Seq("# ", lines.head) +: lineSeqs
       } else {
-        Seq(Seq("// ", lines(0)))
+        Seq(Seq("# ", lines(0)))
       }
     }
 
     // Turn ports into Seq[String] and add to portdefs
     def build_ports(): Unit = {
-      def padToMax(strs: Seq[String]): Seq[String] = {
-        val len = if (strs.nonEmpty) strs.map(_.length).max else 0
-        strs map (_.padTo(len, ' '))
-      }
 
       // Turn directions into strings (and AnalogType into inout)
       val dirs = m.ports map { case Port(_, name, dir, tpe) =>
         (dir, tpe) match {
-          case (_, AnalogType(_)) => "inout " // padded to length of output
-          case (Input, _) => "input "
-          case (Output, _) => "output"
+          case (Input, _) => "InPort"
+          case (Output, _) => "OutPort"
+          case (_, AnalogType(_)) => error(s"No analog/inout port in PyMTL3 backend: $name")
         }
       }
       // Turn types into strings, all ports must be GroundTypes
@@ -1515,8 +1478,7 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
         case port: Port => error(s"Trying to emit non-GroundType Port $port")
       }
 
-      // dirs are already padded
-      (dirs, padToMax(tpes), m.ports).zipped.toSeq.zipWithIndex.foreach {
+      (dirs, tpes, m.ports).zipped.toSeq.zipWithIndex.foreach {
         case ((dir, tpe, Port(info, name, _, _)), i) =>
           portDescriptions.get(name) match {
             case Some(DocString(s)) =>
@@ -1524,12 +1486,8 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
               portdefs ++= build_comment(s.string)
             case other =>
           }
-
-          if (i != m.ports.size - 1) {
-            portdefs += Seq(dir, " ", tpe, " ", name, ",", info)
-          } else {
-            portdefs += Seq(dir, " ", tpe, " ", name, info)
-          }
+          // No need to check index in PyMTL3
+          portdefs += Seq(name, " = ", dir, "( Bits", tpe, " )", dumpInfo(info) )
       }
     }
 
@@ -1551,14 +1509,15 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
         case sx@Connect(info, loc@WRef(_, _, PortKind | WireKind | InstanceKind, _), expr) =>
           assign(loc, expr, info)
         case sx: DefWire =>
-          declare("wire", sx.name, sx.tpe, sx.info)
+          declare("Wire", sx.name, sx.tpe, sx.info)
         case sx: DefRegister =>
-          declare("reg", sx.name, sx.tpe, sx.info)
+          declare("Wire", sx.name, sx.tpe, sx.info)
           val e = wref(sx.name, sx.tpe)
           regUpdate(e, sx.clock, sx.reset, sx.init)
-          initialize(e, sx.reset, sx.init)
+          // Shunning: remove initialize
+          //initialize(e, sx.reset, sx.init)
         case sx: DefNode =>
-          declare("wire", sx.name, sx.value.tpe, sx.info)
+          declare("Wire", sx.name, sx.value.tpe, sx.info)
           assign(WRef(sx.name, sx.value.tpe, NodeKind, SourceFlow), sx.value, sx.info)
         case sx: Stop =>
           simulate(sx.clk, sx.en, stop(sx.ret), Some("STOP_COND"), sx.info)
@@ -1586,7 +1545,7 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
             case Module(_, name, _, _) => (name, Seq.empty)
           }
           val ps = if (params.nonEmpty) params map stringify mkString("#(", ", ", ") ") else ""
-          instdeclares += Seq(module, " ", ps, sx.name, " (", sx.info)
+          instdeclares += Seq(module, " ", ps, sx.name, " (", dumpInfo(sx.info) )
           for (((port, ref), i) <- sx.portCons.zipWithIndex) {
             val line = Seq(tab, ".", remove_root(port), "(", ref, ")")
             if (i != sx.portCons.size - 1) instdeclares += Seq(line, ",")
@@ -1597,9 +1556,11 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
           val fullSize = sx.depth * (sx.dataType match {
                                        case GroundType(IntWidth(width)) => width
                                      })
-          val decl = if (fullSize > (1 << 29)) "reg /* sparse */" else "reg"
-          declareVectorType(decl, sx.name, sx.dataType, sx.depth, sx.info)
-          initialize_mem(sx)
+          //val decl = if (fullSize > (1 << 29)) "reg /* sparse */" else "reg"
+          // Shunning: in PyMTL3 we always do wire because SV backend will accept logic
+          declareVectorType("Wire", sx.name, sx.dataType, sx.depth, sx.info)
+          // Shunning: Remove initialize mem
+          //initialize_mem(sx)
           if (sx.readLatency != 0 || sx.writeLatency != 1)
             throw EmitterException("All memories should be transformed into " +
                                      "blackboxes or combinational by previous passses")
@@ -1608,9 +1569,9 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
             val addr = memPortField(sx, r, "addr")
             // Ports should share an always@posedge, so can't have intermediary wire
 
-            declare("wire", LowerTypes.loweredName(data), data.tpe, sx.info)
-            declare("wire", LowerTypes.loweredName(addr), addr.tpe, sx.info)
-            // declare("wire", LowerTypes.loweredName(en), en.tpe)
+            declare("Wire", LowerTypes.loweredName(data), data.tpe, sx.info)
+            declare("Wire", LowerTypes.loweredName(addr), addr.tpe, sx.info)
+            // declare("Wire", LowerTypes.loweredName(en), en.tpe)
 
             //; Read port
             assign(addr, netlist(addr), NoInfo) // Info should come from addr connection
@@ -1622,8 +1583,9 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
 
             if ((sx.depth & (sx.depth - 1)) == 0)
               assign(data, memPort, sx.info)
-            else
-              garbageAssign(data, memPort, garbageGuard, sx.info)
+            // Shunning: remove garbage assign
+            //else
+              //garbageAssign(data, memPort, garbageGuard, sx.info)
           }
 
           for (w <- sx.writers) {
@@ -1634,10 +1596,10 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
             //Ports should share an always@posedge, so can't have intermediary wire
             val clk = netlist(memPortField(sx, w, "clk"))
 
-            declare("wire", LowerTypes.loweredName(data), data.tpe, sx.info)
-            declare("wire", LowerTypes.loweredName(addr), addr.tpe, sx.info)
-            declare("wire", LowerTypes.loweredName(mask), mask.tpe, sx.info)
-            declare("wire", LowerTypes.loweredName(en), en.tpe, sx.info)
+            declare("Wire", LowerTypes.loweredName(data), data.tpe, sx.info)
+            declare("Wire", LowerTypes.loweredName(addr), addr.tpe, sx.info)
+            declare("Wire", LowerTypes.loweredName(mask), mask.tpe, sx.info)
+            declare("Wire", LowerTypes.loweredName(en), en.tpe, sx.info)
 
             // Write port
             // Info should come from netlist
@@ -1663,85 +1625,24 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
         case DocString(s) => build_comment(s.string).foreach(emit(_))
         case other =>
       }
-      emit(Seq("module ", m.name, "(", m.info))
-      for (x <- portdefs) emit(Seq(tab, x))
-      emit(Seq(");"))
 
-      if (declares.isEmpty && assigns.isEmpty) emit(Seq(tab, "initial begin end"))
-      for (x <- declares) emit(Seq(tab, x))
-      for (x <- instdeclares) emit(Seq(tab, x))
-      for (x <- assigns) emit(Seq(tab, x))
-      if (attachAliases.nonEmpty) {
-        emit(Seq("`ifdef SYNTHESIS"))
-        for (x <- attachSynAssigns) emit(Seq(tab, x))
-        emit(Seq("`elsif verilator"))
-        emit(Seq(tab, "`error \"Verilator does not support alias and thus cannot arbirarily connect bidirectional wires and ports\""))
-        emit(Seq("`else"))
-        for (x <- attachAliases) emit(Seq(tab, x))
-        emit(Seq("`endif"))
-      }
-      if (initials.nonEmpty) {
-        emit(Seq("`ifdef RANDOMIZE_GARBAGE_ASSIGN"))
-        emit(Seq("`define RANDOMIZE"))
-        emit(Seq("`endif"))
-        emit(Seq("`ifdef RANDOMIZE_INVALID_ASSIGN"))
-        emit(Seq("`define RANDOMIZE"))
-        emit(Seq("`endif"))
-        emit(Seq("`ifdef RANDOMIZE_REG_INIT"))
-        emit(Seq("`define RANDOMIZE"))
-        emit(Seq("`endif"))
-        emit(Seq("`ifdef RANDOMIZE_MEM_INIT"))
-        emit(Seq("`define RANDOMIZE"))
-        emit(Seq("`endif"))
-        emit(Seq("`ifndef RANDOM"))
-        emit(Seq("`define RANDOM $random"))
-        emit(Seq("`endif"))
-        emit(Seq("`ifdef RANDOMIZE_MEM_INIT"))
-        // Since simulators don't actually support memories larger than 2^31 - 1, there is no reason
-        // to change Verilog emission in the common case. Instead, we only emit a larger initvar
-        // where necessary
-        if (maxMemSize.isValidInt) {
-          emit(Seq("  integer initvar;"))
-        } else {
-          // Width must be able to represent maxMemSize because that's the upper bound in init loop
-          val width = maxMemSize.bitLength - 1 // minus one because [width-1:0] has a width of "width"
-          emit(Seq(s"  reg [$width:0] initvar;"))
-        }
-        emit(Seq("`endif"))
-        emit(Seq("initial begin"))
-        emit(Seq("  `ifdef RANDOMIZE"))
-        emit(Seq("    `ifdef INIT_RANDOM"))
-        emit(Seq("      `INIT_RANDOM"))
-        emit(Seq("    `endif"))
-        // This enables testbenches to seed the random values at some time
-        // before `RANDOMIZE_DELAY (or the legacy value 0.002 if
-        // `RANDOMIZE_DELAY is not defined).
-        // Verilator does not support delay statements, so they are omitted.
-        emit(Seq("    `ifndef VERILATOR"))
-        emit(Seq("      `ifdef RANDOMIZE_DELAY"))
-        emit(Seq("        #`RANDOMIZE_DELAY begin end"))
-        emit(Seq("      `else"))
-        emit(Seq("        #0.002 begin end"))
-        emit(Seq("      `endif"))
-        emit(Seq("    `endif"))
-        for (x <- initials) emit(Seq(tab, x))
-        emit(Seq("  `endif // RANDOMIZE"))
-        for (x <- asyncInitials) emit(Seq(tab, x))
-        emit(Seq("end"))
-      }
+      emit(Seq("class ", m.name, "( Component ): ", dumpInfo(m.info)))
+      emit(Seq(tab, "def construct( s ): ") )
+      for (x <- portdefs) emit(Seq(tab, tab, x))
+
+      for (x <- declares) emit(Seq(tab, tab, x))
+      for (x <- instdeclares) emit(Seq(tab, tab, x))
+      for (x <- assigns) emit(Seq(tab, tab, x))
+
+      // Shunning: initial removed
 
       for ((clk, content) <- noResetAlwaysBlocks if content.nonEmpty) {
-        emit(Seq(tab, "always @(posedge ", clk, ") begin"))
-        for (line <- content) emit(Seq(tab, tab, line))
-        emit(Seq(tab, "end"))
+        emit(Seq(tab, tab, "@s.update_ff"))
+        emit(Seq(tab, tab, "def seq_upblk():"))
+        for (line <- content) emit(Seq(tab, tab, tab, line))
       }
 
-      for ((clk, reset, content) <- asyncResetAlwaysBlocks if content.nonEmpty) {
-        emit(Seq(tab, "always @(posedge ", clk, " or posedge ", reset, ") begin"))
-        for (line <- content) emit(Seq(tab, tab, line))
-        emit(Seq(tab, "end"))
-      }
-      emit(Seq("endmodule"))
+      // Async reset removed
     }
 
     def emit_pymtl3(): DefModule = {
@@ -1761,12 +1662,10 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
         case other =>
       }
 
-      emit(Seq("module ", overrideName, "(", m.info))
-      for (x <- portdefs) emit(Seq(tab, x))
-
-      emit(Seq(");"))
+      emit(Seq("class ", overrideName, ":", dumpInfo(m.info)))
+      emit(Seq("  def construct( s ): ") )
+      for (x <- portdefs) emit(Seq(tab, tab, tab, x))
       emit(body)
-      emit(Seq("endmodule"), top = 0)
       m
     }
   }
