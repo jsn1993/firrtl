@@ -1086,6 +1086,22 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
       s"$wx"
     case _ => throwInternalError(s"trying to write unsupported type in the PyMTL3 Emitter: $tpe")
   }
+
+  // Shunning: helper function for adding "s." and avoid leading "_"
+  def PyMTL3Name(n: Expression): String = {
+    if (n.serialize.take(3) == "_T_")  s"s.T$n"
+    else                              s"s.$n"
+  }
+  def PyMTL3Name(n: String): String =
+    if (n.take(3) == "_T_") s"s.T$n"
+    else                    s"s.$n"
+
+  def revertToFieldName(n: String): String = {
+    if (n.take(6) == "s.T_T_")  n.drop(3)
+    else if (n.take(2) == "s.") n.drop(2)
+    else                        n
+  }
+
   def emit(x: Any)(implicit w: Writer): Unit = { emit(x, 0) }
   def emit(x: Any, top: Int)(implicit w: Writer): Unit = {
     def cast(e: Expression): Any = e.tpe match {
@@ -1104,14 +1120,15 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
         if (e.tpe == AsyncResetType) {
           throw EmitterException("Cannot emit async reset muxes directly")
         }
-        emit(Seq(e.cond," ? ",cast(e.tval)," : ",cast(e.fval)),top + 1)
+        // Shunning: change to Python x if cond else y
+        emit(Seq(cast(e.tval)," if ", e.cond, " else ", cast(e.fval)), top + 1)
       }
       case (e: ValidIf) => emit(Seq(cast(e.value)),top + 1)
       // Shunning: add "s." to all the signals
-      case (e: WRef) => w write s"s.${e.serialize}"
-      case (e: WSubField) => w write s"s.${LowerTypes.loweredName(e)}"
-      case (e: WSubAccess) => w write s"s.${LowerTypes.loweredName(e.expr)}[s.${LowerTypes.loweredName(e.index)}]"
-      case (e: WSubIndex) => w write s"s.${e.serialize}"
+      case (e: WRef) => w write PyMTL3Name(s"${e.serialize}")
+      case (e: WSubField) => w write PyMTL3Name(s"${LowerTypes.loweredName(e)}")
+      case (e: WSubAccess) => w write PyMTL3Name(s"${LowerTypes.loweredName(e.expr)}[s.${LowerTypes.loweredName(e.index)}]")
+      case (e: WSubIndex) => w write PyMTL3Name(s"${e.serialize}")
       case (e: Literal) => v_print(e)
       case (e: VRandom) => w write s"{${e.nWords}{`RANDOM}}"
       case (t: GroundType) => w write stringify(t)
@@ -1140,8 +1157,8 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
      case SIntLiteral(value, IntWidth(width)) =>
        val stringLiteral = value.toString(16)
        w write (stringLiteral.head match {
-         case '-' => s"-$width'sh${stringLiteral.tail}"
-         case _ => s"$width'sh${stringLiteral}"
+         case '-' => s"-b$width(0x${stringLiteral.tail})"
+         case _ => s"b$width(0x${stringLiteral})"
        })
      case _ => throwInternalError(s"attempt to print unrecognized expression: $e")
    }
@@ -1223,9 +1240,9 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
          else doprim.tpe match {
            // Either sign extend or zero extend.
            // If width == BigInt(1), don't extract bit
-           case (_: SIntType) if w == BigInt(1) => Seq("{", c0, "{", a0, "}}")
-           case (_: SIntType) => Seq("{{", diff, "{", a0, "[", w - 1, "]}},", a0, "}")
-           case (_) => Seq("{{", diff, "'d0}, ", a0, "}")
+           // Shunning: wow sext/zext simplfies this a lot
+           case (_: SIntType) => Seq("sext( ", c0, ", ", a0, " )")
+           case (_) => Seq("zext( ", c0, ", ", a0, " )")
          }
        case AsUInt => Seq("$unsigned(", a0, ")")
        case AsSInt => Seq("$signed(", a0, ")")
@@ -1243,7 +1260,7 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
        case Shr => Seq(a0,"[", c0, ":", bitWidth(a0.tpe), "]")
        case Neg => Seq("- ", cast(a0))
        case Cvt => a0.tpe match {
-         case (_: UIntType) => Seq("{1'b0,", cast(a0), "}")
+         case (_: UIntType) => Seq("zext( 33,", cast(a0), ")")
          case (_: SIntType) => Seq(cast(a0))
        }
        case Not => Seq("~ ", a0)
@@ -1253,7 +1270,7 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
        case Andr => Seq("&", cast(a0))
        case Orr => Seq("|", cast(a0))
        case Xorr => Seq("^", cast(a0))
-       case Cat => "{" +: (castCatArgs(a0, a1) :+ "}")
+       case Cat => "concat( " +: (castCatArgs(a0, a1) :+ " )")
        // If selecting zeroth bit and single-bit wire, just emit the wire
        case Bits if c0 == 0 && c1 == 0 && bitWidth(a0.tpe) == BigInt(1) => Seq(a0)
        case Bits if c0 == c1 => Seq(a0, "[", c0, "]")
@@ -1344,23 +1361,17 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
       if (bi.isValidInt) bi.toString else s"${bi.bitLength}'d$bi"
 
     def declareVectorType(b: String, n: String, tpe: Type, size: BigInt, info: Info) = {
-      //declares += Seq(b, " ", tpe, " ", n, " [0:", bigIntToVLit(size - 1), "];", info)
-      declares += Seq(n, " = [ ", b, "( Bits", tpe, " ) for _ in range(", bigIntToVLit(size), ") ]", dumpInfo(info))
+      declares += Seq(PyMTL3Name(n), " = [ ", b, "( Bits", tpe, " ) for _ in range(", bigIntToVLit(size), ") ]", dumpInfo(info))
     }
 
     def declare(b: String, n: String, t: Type, info: Info) = t match {
       case tx: VectorType =>
         declareVectorType(b, n, tx.tpe, tx.size, info)
       case tx =>
-        //declares += Seq(b, " ", tx, " ", n,";",info)
-        declares += Seq(n, " = ", b, "( Bits", tx," )", dumpInfo(info))
+        declares += Seq(PyMTL3Name(n), " = ", b, "( Bits", tx," )", dumpInfo(info))
     }
     // Shunning: generate lambda to begin with
     def assign(e: Expression, value: Expression, info: Info): Unit = {
-      //assigns += Seq("@s.update")
-      //assigns += Seq("def assign_", e, "():" )// # ", info)
-      //assigns += Seq(tab, e, " = ", value)
-      //assigns += Seq(e, " //= lambda: ", value, dumpInfo(info) )
       // Shunning: I try to avoid lambda when simple connect can solve the problem
       value match {
         case _: UIntLiteral | _: WRef =>
@@ -1487,7 +1498,7 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
             case other =>
           }
           // No need to check index in PyMTL3
-          portdefs += Seq(name, " = ", dir, "( Bits", tpe, " )", dumpInfo(info) )
+          portdefs += Seq(PyMTL3Name(name), " = ", dir, "( Bits", tpe, " )", dumpInfo(info) )
       }
     }
 
@@ -1544,14 +1555,15 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
             case ExtModule(_, _, _, extname, params) => (extname, params)
             case Module(_, name, _, _) => (name, Seq.empty)
           }
-          val ps = if (params.nonEmpty) params map stringify mkString("#(", ", ", ") ") else ""
-          instdeclares += Seq(module, " ", ps, sx.name, " (", dumpInfo(sx.info) )
+          val ps = if (params.nonEmpty) params map stringify mkString("(", ", ", ") ") else "()"
+          instdeclares += Seq(PyMTL3Name(sx.name), " = ", module, ps, "(", dumpInfo(sx.info) )
           for (((port, ref), i) <- sx.portCons.zipWithIndex) {
-            val line = Seq(tab, ".", remove_root(port), "(", ref, ")")
-            if (i != sx.portCons.size - 1) instdeclares += Seq(line, ",")
-            else instdeclares += line
+            // Shunning: need to turn ref to string first and then remove the "s." prefix. Otherwise
+            // emit() will emit "s."
+            val line = Seq(tab, revertToFieldName(PyMTL3Name(ref.serialize)), " = ", remove_root(port), "," )
+            instdeclares += line
           }
-          instdeclares += Seq(");")
+          instdeclares += Seq(")")
         case sx: DefMemory =>
           val fullSize = sx.depth * (sx.dataType match {
                                        case GroundType(IntWidth(width)) => width
