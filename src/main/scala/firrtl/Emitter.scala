@@ -1088,25 +1088,23 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
   }
 
   // Shunning: helper function for adding "s." and avoid leading "_"
-  def PyMTL3Name(n: Expression): String = {
-    if (n.serialize.take(3) == "_T_")  s"s.T$n"
-    else                              s"s.$n"
+  def PyMTL3Name(n: String): String = {
+    if (n.take(1) == "_") s"s.${n.drop(1)}"
+    else                  s"s.$n"
   }
-  def PyMTL3Name(n: String): String =
-    if (n.take(3) == "_T_") s"s.T$n"
-    else                    s"s.$n"
+
+  def PyMTL3Name(n: Expression): String = PyMTL3Name(n.serialize)
 
   def revertToFieldName(n: String): String = {
-    if (n.take(6) == "s.T_T_")  n.drop(3)
-    else if (n.take(2) == "s.") n.drop(2)
-    else                        n
+    if (n.take(2) == "s.") n.drop(2)
+    else                   n
   }
 
   def emit(x: Any)(implicit w: Writer): Unit = { emit(x, 0) }
   def emit(x: Any, top: Int)(implicit w: Writer): Unit = {
     def cast(e: Expression): Any = e.tpe match {
       case (t: UIntType) => e
-      case (t: SIntType) => Seq("$signed(",e,")")
+      case (t: SIntType) => Seq(e,".int()")
       case ClockType => e
       case AnalogType(_) => e
       case _ => throwInternalError(s"unrecognized cast: $e")
@@ -1127,7 +1125,7 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
       // Shunning: add "s." to all the signals
       case (e: WRef) => w write PyMTL3Name(s"${e.serialize}")
       case (e: WSubField) => w write PyMTL3Name(s"${LowerTypes.loweredName(e)}")
-      case (e: WSubAccess) => w write PyMTL3Name(s"${LowerTypes.loweredName(e.expr)}[s.${LowerTypes.loweredName(e.index)}]")
+      case (e: WSubAccess) => w write PyMTL3Name(s"${LowerTypes.loweredName(e.expr)}[${PyMTL3Name(LowerTypes.loweredName(e.index))}]")
       case (e: WSubIndex) => w write PyMTL3Name(s"${e.serialize}")
       case (e: Literal) => v_print(e)
       case (e: VRandom) => w write s"{${e.nWords}{`RANDOM}}"
@@ -1171,20 +1169,20 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
        }) match {
          case None => e
          case Some(_) => e.tpe match {
-           case (_: SIntType) => Seq("$signed(", e, ")")
-           case (_: UIntType) => Seq("$signed({1'b0,", e, "})")
+           case (_: SIntType) => Seq(e, ".int()")
+           case (_: UIntType) => Seq(e)
            case _ => throwInternalError(s"unrecognized type: $e")
          }
        }
      }
      def cast(e: Expression): Any = doprim.tpe match {
        case (t: UIntType) => e
-       case (t: SIntType) => Seq("$signed(",e,")")
+       case (t: SIntType) => Seq(e,".int()")
        case _ => throwInternalError(s"cast - unrecognized type: $e")
      }
      def cast_as(e: Expression): Any = e.tpe match {
        case (t: UIntType) => e
-       case (t: SIntType) => Seq("$signed(",e,")")
+       case (t: SIntType) => Seq(e,".int()")
        case _ => throwInternalError(s"cast_as - unrecognized type: $e")
      }
      def a0: Expression = doprim.args.head
@@ -1244,8 +1242,8 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
            case (_: SIntType) => Seq("sext( ", c0, ", ", a0, " )")
            case (_) => Seq("zext( ", c0, ", ", a0, " )")
          }
-       case AsUInt => Seq("$unsigned(", a0, ")")
-       case AsSInt => Seq("$signed(", a0, ")")
+       case AsUInt => Seq(a0)
+       case AsSInt => Seq(a0, ".int()")
        case AsClock => Seq(a0)
        case AsAsyncReset => Seq(a0)
        case Dshlw => Seq(cast(a0), " << ", a1)
@@ -1274,7 +1272,7 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
        // If selecting zeroth bit and single-bit wire, just emit the wire
        case Bits if c0 == 0 && c1 == 0 && bitWidth(a0.tpe) == BigInt(1) => Seq(a0)
        case Bits if c0 == c1 => Seq(a0, "[", c0, "]")
-       case Bits => Seq(a0, "[", c0, ":", c1, "]")
+       case Bits => Seq(a0, "[", c1, ":", c0 + 1, "]")
        case Head =>
          val w = bitWidth(a0.tpe)
          // Verilog [high-1:low] <=> PyMTL [low:high]
@@ -1409,7 +1407,7 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
               case (false, true) =>
                 ifNotStatement +: falseCase
             }
-          case e => Seq(Seq(tabs, r, " <<= ", e, ";"))
+          case e => Seq(Seq(tabs, r, " <<= ", e))
         }
       }
       if (weq(init, r)) { // Synchronous Reset
@@ -1530,10 +1528,10 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
         case sx: DefNode =>
           declare("Wire", sx.name, sx.value.tpe, sx.info)
           assign(WRef(sx.name, sx.value.tpe, NodeKind, SourceFlow), sx.value, sx.info)
-        case sx: Stop =>
-          simulate(sx.clk, sx.en, stop(sx.ret), Some("STOP_COND"), sx.info)
-        case sx: Print =>
-          simulate(sx.clk, sx.en, printf(sx.string, sx.args), Some("PRINTF_COND"), sx.info)
+        //case sx: Stop =>
+          //simulate(sx.clk, sx.en, stop(sx.ret), Some("STOP_COND"), sx.info)
+        //case sx: Print =>
+          //simulate(sx.clk, sx.en, printf(sx.string, sx.args), Some("PRINTF_COND"), sx.info)
         // If we are emitting an Attach, it must not have been removable in VerilogPrep
         case sx: Attach =>
           // For Synthesis
@@ -1560,7 +1558,7 @@ class PyMTL3Emitter extends SeqTransform with Emitter {
           for (((port, ref), i) <- sx.portCons.zipWithIndex) {
             // Shunning: need to turn ref to string first and then remove the "s." prefix. Otherwise
             // emit() will emit "s."
-            val line = Seq(tab, revertToFieldName(PyMTL3Name(ref.serialize)), " = ", remove_root(port), "," )
+            val line = Seq(tab, revertToFieldName(remove_root(port).serialize), " = ", ref, "," )
             instdeclares += line
           }
           instdeclares += Seq(")")
